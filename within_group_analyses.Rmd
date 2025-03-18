@@ -1,0 +1,640 @@
+---
+title: "Within Group Analysis"
+author: "Kennedy Zinn"
+date: "2025-02-14"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages(library(minfi))
+suppressPackageStartupMessages(library(limma))
+suppressPackageStartupMessages(library(DMRcate))
+suppressPackageStartupMessages(library(maxprobes))
+suppressPackageStartupMessages(library(readxl))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(missMethyl))
+suppressPackageStartupMessages(library(MethylToSNP))
+```
+
+# Within Group Analysis
+
+```{r}
+library(lme4)
+```
+
+```{r}
+# load the idat files
+rgSet <- read.metharray.exp("/Users/kennedyzinn/Desktop/OneDrive - UTHealth Houston/GRA/dna methyl/within groups/All Phases", force = T)
+```
+
+```{r}
+# load sample sheet
+sample_sheet <- read_excel("/Users/kennedyzinn/Desktop/OneDrive - UTHealth Houston/GRA/dna methyl/within groups/All Phases/sample_sheet_ALL.xlsx")
+```
+
+#### Pre-processing
+
+```{r}
+source("/Users/kennedyzinn/Desktop/OneDrive - UTHealth Houston/GRA/dna methyl/process_methyl_microarray.R")
+gmSet <- process_methyl_microarray(rgSet)
+```
+
+Beta values, which range between [0,1], represent the proportion of methylated DNA copies at a specific CpG site compared to all of the DNA copies at that site. Beta values for the ith CpG site are mathematically defined as,
+
+Beta(i) = max(yi(methyl),0) / [max(yi(unmethyl), 0) + max(yi(methyl), 0) + alpha],
+
+where yi methyl and unmethyl are the intensities measured by the ith methylated and unmethylated probes, respectively. 0 ensures that negative signals that take place after background adjustment are not considered. Alpha, a constant (usually 100), serves as an offset to regularize beta when both methylated and unmethylated instensities are low. Beta values are intuitive, and hence useful for visual presentations of the reads. (Du et al., 2010)
+
+```{r, echo = FALSE}
+# Compute beta values
+beta_values <- getBeta(gmSet)
+colnames(beta_values) <- sample_sheet$`Sample Name`
+```
+
+M values are log transformed beta values. Negative M values indicate higher levels of unmethylated DNA copies than methylated DNA copies. Postive M values indicate higher levels of methylated DNA copies than unmethylated. M values close to zero indicate similar intensities between methylated and unmethylated probes. M values are mathematically expressed as,
+
+M(i) = log2([max(yi(methyl))+alpha]/[max(yi(unmethyl))+alpha])
+
+where alpha is a constant to offset dramatic changes resulting from small estimation errors. M values can be expressed in terms of beta values,
+
+M(i) = log2(Beta(i)/[1 - Beta(i)])
+
+and therefore, beta values can be expressed in terms of M values,
+
+Beta(i) = 2\^M(i) / [2\^M(i) + 1]
+
+M values are more statistically sound than beta values.
+
+```{r}
+# Compute M values
+Mval <- getM(gmSet)
+dim(Mval)
+```
+
+Most variation seems explained by phase (PC1) and ID (PC2). However, proportion of variation is low ((lambda1+lambda2)/total var = 35%)
+
+```{r}
+# PCA of M values
+par(mfrow=c(1,1), cex =.5)
+plotMDS(Mval, labels=sample_sheet$`ID`, col=as.integer(factor(sample_sheet$Phase)))
+legend("top",legend=c("IPSC", "NCC", "SMC"), col=1:3)
+```
+
+PC1 and PC2 by disease status
+
+```{r}
+par(mfrow=c(1,1), cex =.5)
+plotMDS(Mval, labels=sample_sheet$`ID`, col=as.integer(factor(sample_sheet$Status)))
+legend("top",legend=c("Control", "Patient"), col=1:2)
+```
+
+PC3 and PC4
+
+```{r}
+par(mfrow=c(1,1), cex =.5)
+plotMDS(Mval, labels=sample_sheet$Phase, col=as.integer(factor(sample_sheet$Status)), dim.plot = 3:4)
+legend("top",legend=c("Control","Patient"),col=1:2)
+```
+
+### ALL
+
+#### Differential Methylation
+
+```{r}
+# Design matrix
+phase <- factor(sample_sheet$Phase)
+disease <- factor(sample_sheet$Status)
+design <- model.matrix(~1 + disease + phase, data = sample_sheet)
+colnames(design) <- c(levels(disease),levels(phase)[-1])
+colnames(design) <- make.names(colnames(design))
+design
+```
+
+Fit model using M values M values are more statistically valid, beta is more intuitive (Du et al., 2010)
+
+```{r}
+fit.reduced <- lmFit(Mval, design)
+# create a contrast matrix for specific comparisons
+contMatrix <- makeContrasts(control-patient,
+                           levels=design)
+contMatrix
+# fit the contrasts
+fit <- contrasts.fit(fit.reduced, contMatrix)
+# Rank genes
+fit <- eBayes(fit)
+```
+
+Model Results
+
+```{r}
+summary(decideTests(fit))
+top<-topTable(fit,coef=1)
+top
+```
+
+
+#### Gene Ontology Analysis
+
+##### CpG Analysis
+```{r, echo = F}
+# Observe differentially methylated CpGs using 5% FDR cut-off
+top <- topRUV(rfit4, number = Inf, p.BH = 1)
+table(top$p.BH_X1.1 < 0.05)
+```
+
+```{r}
+topCpGs <- topRUV(rfit4,number=37)
+sigCpGs <- rownames(topCpGs)
+check <- getMappedEntrezIDs(sig.cpg = sigCpGs, array.type = "EPIC")
+```
+
+```{r}
+# Check number of genes to which CpGs are annotated
+length(check$sig.eg)
+```
+
+```{r}
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+gst <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(top), collection="GO", array.type = "EPIC",
+              plot.bias=TRUE) # Include "all.cpg" option if filtering CpGs prior to testing
+```
+
+```{r}
+topGSA(gst)
+```
+We can also test according to a specified gene set using "gsameth"
+
+##### Region level analysis
+
+```{r}
+myAnnotation <- cpg.annotate(object = Mval, datatype = "array", what = "M", 
+                             arraytype = c("EPICv1"), 
+                             analysis.type = "differential", design = design, 
+                             coef = 2)
+```
+
+```{r}
+DMRs <- suppressMessages(dmrcate(myAnnotation, C=2, pcutoff = 0.05))
+```
+
+```{r}
+results.ranges <- extractRanges(DMRs, genome = "hg19")
+results.ranges
+```
+
+```{r}
+group <- factor(sample_sheet$Status,levels=c("control","patient"))
+cols <- c(2,4)[group]
+names(cols) <- group
+par(mfrow=c(1,1))
+DMR.plot(ranges=results.ranges, dmr=2, CpGs=beta_values, phen.col=cols, 
+         what="Beta", arraytype="EPICv1", genome="hg19")
+```
+
+```{r}
+gst.region <- goregion(results.ranges, all.cpg=rownames(Mval), 
+                       collection="GO", array.type="EPIC", plot.bias=TRUE)
+```
+
+```{r}
+topGSA(gst.region)
+```
+We can also test according to a specified gene set using "gsaregion"
+
+#### KEGG Analysis
+
+##### CpG Analysis
+
+```{r}
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+gst <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(top), collection="KEGG", array.type = "EPIC",
+              plot.bias=TRUE) # Include "all.cpg" option if filtering CpGs prior to testing
+```
+
+```{r}
+topGSA(gst)
+```
+We can also test according to a specified gene set using "gsameth"
+
+##### Region level analysis
+
+```{r}
+gst.region <- goregion(results.ranges, all.cpg=rownames(Mval), 
+                       collection="KEGG", array.type="EPIC", plot.bias=TRUE)
+```
+
+```{r}
+topGSA(gst.region)
+```
+
+### Patient Group
+
+```{r}
+patient_sheet <- sample_sheet %>% 
+  filter(Status == "patient")
+```
+
+```{r}
+# filter the idat files for patient files
+patient_sheet$file_name <- paste(patient_sheet$`Sentrix ID`, patient_sheet$`Sentrix Position`, sep = "_")
+patient_files <- patient_sheet$file_name
+rgSet_sample_names <- sampleNames(rgSet)
+common_samples <- intersect(rgSet_sample_names, patient_files)
+rgSet_pt <- rgSet[, common_samples]
+dim(rgSet_pt)
+```
+
+#### Pre-processing
+
+```{r}
+source("/Users/kennedyzinn/Desktop/OneDrive - UTHealth Houston/GRA/dna methyl/process_methyl_microarray.R")
+gmSet <- process_methyl_microarray(rgSet_pt)
+```
+
+```{r}
+#Compute beta values
+beta_values <- getBeta(gmSet)
+colnames(beta_values) <- patient_sheet$`Sample Name`
+```
+
+```{r}
+# Compute M values
+Mval <- getM(gmSet)
+dim(Mval)
+```
+
+From the PCA plot, it seems that PC2 groups A2C3 against all others.
+
+```{r}
+# PCA of M values
+par(mfrow=c(1,1), cex =.5)
+plotMDS(Mval, labels=patient_sheet$`ID`, col=as.integer(factor(patient_sheet$Phase)))
+legend("top", legend = c("iPSCs", "NCC", "SMC"), pch = 16, col = 1:3)
+```
+
+#### Differential Methylation
+
+```{r}
+# Design matrix
+phase <- factor(patient_sheet$Phase)
+id <- factor(patient_sheet$ID)
+design <- model.matrix(~1 + id + phase, data = patient_sheet)
+colnames(design) <- c(levels(id),levels(phase)[-1])
+design
+```
+
+```{r}
+fit.reduced <- lmFit(Mval, design)
+# Contrast matrix
+colnames(design) <- make.names(colnames(design))
+contrast <- makeContrasts(X10462-X9759, A2C3-X10462, A2C3-X9759, levels = design)
+contrast
+fit <- contrasts.fit(fit.reduced, contrast)
+fit <- eBayes(fit)
+```
+
+It seems A2C3 and 9759 are the least different ( but still significantly so)
+
+```{r}
+summary(decideTests(fit))
+```
+
+```{r}
+top<-topTable(fit,coef=3, number = Inf)
+top
+```
+
+#### Gene Ontology Analysis
+
+##### CpG Analysis
+
+```{r, echo = F}
+# Observe differentially methylated CpGs using 5% FDR cut-off
+table(top$adj.P.Val < 0.05)
+```
+
+```{r}
+topCpGs <- topTable(fit,coef = 3, number=783)
+sigCpGs <- rownames(topCpGs)
+check <- getMappedEntrezIDs(sig.cpg = sigCpGs, array.type = "EPIC")
+```
+
+```{r}
+# Check number of genes to which CpGs are annotated
+length(check$sig.eg)
+```
+
+```{r}
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+gst <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(top), collection="GO", array.type = "EPIC",
+              plot.bias=TRUE) # Include "all.cpg" option if filtering CpGs prior to testing
+```
+
+```{r}
+topGSA(gst)
+```
+
+We can also test according to a specified gene set using "gsameth"
+
+##### Region level analysis
+
+```{r}
+region_analysis <- function(contrast_coeff, gene_database){
+  myAnnotation <- cpg.annotate(object = Mval, datatype = "array", what = "M", 
+                             arraytype = c("EPICv1"), 
+                             analysis.type = "differential", design = design, contrast = T, cont.matrix = contrast, coef = contrast_coeff)
+  DMRs <- suppressMessages(dmrcate(myAnnotation, C=2))
+  results.ranges <- extractRanges(DMRs, genome = "hg19")
+  gst.region <- goregion(results.ranges, all.cpg=rownames(Mval), 
+                       collection= gene_database, array.type="EPIC")
+  topGSA(gst.region)
+  }
+```
+
+```{r}
+region_analysis("X10462 - X9759", "GO")
+```
+
+```{r}
+region_analysis("A2C3 - X10462", "GO")
+```
+
+No significantly differentially expressed Gene Ontology sets between A2C3 and 9759. 10462 seems to be an outlier from the other two samples in this case.
+```{r}
+region_analysis("A2C3 - X9759", "GO")
+```
+
+We can also test according to a specified gene set using "gsaregion"
+
+#### KEGG Analysis
+
+##### CpG Analysis
+
+```{r}
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+gst <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(top), collection="KEGG", array.type = "EPIC",
+              plot.bias=TRUE) # Include "all.cpg" option if filtering CpGs prior to testing
+```
+
+```{r}
+topGSA(gst)
+```
+
+We can also test according to a specified gene set using "gsameth"
+
+##### Region level analysis
+
+```{r}
+region_analysis("X10462 - X9759", "KEGG", "NULL")
+```
+
+```{r}
+region_analysis("A2C3 - X10462", "KEGG", "NULL")
+```
+
+```{r}
+region_analysis("A2C3 - X9759", "KEGG", "NULL")
+```
+
+### Control Group
+
+```{r}
+control_sheet <- sample_sheet %>% 
+  filter(Status == "control")
+```
+
+```{r}
+# filter the idat files for patient files
+control_sheet$file_name <- paste(control_sheet$`Sentrix ID`, control_sheet$`Sentrix Position`, sep = "_")
+control_files <- control_sheet$file_name
+rgSet_sample_names <- sampleNames(rgSet)
+common_samples <- intersect(rgSet_sample_names, control_files)
+rgSet_ctrl <- rgSet[, common_samples]
+dim(rgSet_ctrl)
+```
+
+
+#### Pre-processing
+
+```{r}
+source("/Users/kennedyzinn/Desktop/OneDrive - UTHealth Houston/GRA/dna methyl/process_methyl_microarray.R")
+gmSet <- process_methyl_microarray(rgSet_ctrl)
+```
+
+```{r}
+#Compute beta values
+beta_values <- getBeta(gmSet)
+colnames(beta_values) <- control_sheet$`Sample Name`
+```
+
+```{r}
+# Compute M values
+Mval <- getM(gmSet)
+dim(Mval)
+```
+
+PC1, 24% of variation, in control group is by phase. PC2 seems to be grouped by individual variation.
+
+```{r}
+# PCA of M values
+par(mfrow=c(1,1), cex =.5)
+plotMDS(Mval, labels=control_sheet$`ID`, col=as.integer(factor(control_sheet$Phase)))
+legend("top", legend = c("iPSCs", "NCC", "SMC"), pch = 16, col = 1:3)
+```
+
+#### Differential Methylation
+
+```{r}
+# Design matrix
+phase <- factor(control_sheet$Phase)
+id <- factor(control_sheet$ID)
+design <- model.matrix(~1 + id + phase, data = control_sheet)
+colnames(design) <- c(levels(id),levels(phase)[-1])
+design
+```
+
+```{r}
+fit.reduced <- lmFit(Mval, design)
+# Contrast matrix
+colnames(design) <- make.names(colnames(design))
+contrast <- makeContrasts(X3000-X3015, Fore2-X3000, Fore2-X3015, ND2.0-Fore2, ND2.0-X3000, ND2.0-X3015, levels = design)
+contrast
+fit <- contrasts.fit(fit.reduced, contrast)
+fit <- eBayes(fit)
+```
+
+```{r}
+summary(decideTests(fit))
+top <-topTable(fit,coef=1)
+top
+```
+
+#### Gene Ontology Analysis
+
+##### CpG Analysis
+
+```{r, echo = F}
+# Observe differentially methylated CpGs using 5% FDR cut-off
+table(top$adj.P.Val < 0.05)
+```
+
+```{r}
+topCpGs <- topTable(fit,coef = 3, number=783)
+sigCpGs <- rownames(topCpGs)
+check <- getMappedEntrezIDs(sig.cpg = sigCpGs, array.type = "EPIC")
+```
+
+```{r}
+# Check number of genes to which CpGs are annotated
+length(check$sig.eg)
+```
+
+```{r}
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+gst <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(top), collection="GO", array.type = "EPIC",
+              plot.bias=TRUE) # Include "all.cpg" option if filtering CpGs prior to testing
+```
+
+```{r}
+topGSA(gst)
+```
+
+We can also test according to a specified gene set using "gsameth"
+
+##### Region level analysis
+
+```{r}
+region_analysis("X3000-X3015", "GO")
+```
+
+```{r}
+region_analysis("Fore2-X3000", "GO")
+```
+
+```{r}
+region_analysis("Fore2-X3015", "GO")
+```
+
+```{r}
+region_analysis("ND2.0-Fore2", "GO")
+```
+
+```{r}
+region_analysis("ND2.0-X3000", "GO")
+```
+
+```{r}
+region_analysis("ND2.0-X3015", "GO")
+```
+
+We can also test according to a specified gene set using "gsaregion"
+
+#### KEGG Analysis
+
+##### CpG Analysis
+
+```{r}
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+gst <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(top), collection="KEGG", array.type = "EPIC",
+              plot.bias=TRUE) # Include "all.cpg" option if filtering CpGs prior to testing
+```
+
+```{r}
+topGSA(gst)
+```
+
+We can also test according to a specified gene set using "gsameth"
+
+##### Region level analysis
+
+```{r}
+region_analysis("X3000-X3015", "KEGG")
+```
+
+```{r}
+region_analysis("Fore2-X3000", "KEGG")
+```
+
+```{r}
+region_analysis("Fore2-X3015", "KEGG")
+```
+
+```{r}
+region_analysis("ND2.0-Fore2", "KEGG")
+```
+
+```{r}
+region_analysis("ND2.0-X3000", "KEGG")
+```
+
+```{r}
+region_analysis("ND2.0-X3015", "KEGG")
+```
+
+### Patient 3000 (Samples 6, 15 and 16)
+
+```{r}
+rgSet_3000 <- read.metharray.exp("/Users/kennedyzinn/Desktop/OneDrive - UTHealth Houston/GRA/dna methyl/within groups/Patient 3000")
+```
+
+```{r}
+pt3000_sheet <- read_excel("/Users/kennedyzinn/Desktop/OneDrive - UTHealth Houston/GRA/dna methyl/within groups/Patient 3000/SampleSheet_pt.3000.xlsx")
+```
+
+#### Pre-processing
+
+```{r}
+source("/Users/kennedyzinn/Desktop/OneDrive - UTHealth Houston/GRA/dna methyl/process_methyl_microarray.R")
+gmSet <- process_methyl_microarray(rgSet_3000)
+```
+
+```{r}
+#Compute beta values
+beta_values <- getBeta(gmSet)
+colnames(beta_values) <- pt3000_sheet$`Sample Name`
+```
+
+```{r}
+# Compute M values
+Mval <- getM(gmSet)
+dim(Mval)
+```
+
+This shows that treatment TC1 and TC2 account for nearly all differences between 6 and 15/16 (and that tissues respond similarly to TC1 and TC2)
+
+```{r}
+# PCA of M values
+par(mfrow=c(1,1), cex =.5)
+plotMDS(Mval, labels=pt3000_sheet$`Sample Name`, col=as.integer(factor(pt3000_sheet$Treatment)))
+legend("top", legend = c("TGFb", "TC", "TC"), pch = 16, col = 1:2)
+```
+
+#### Differential Methylation
+
+```{r}
+# Design matrix
+tx <- factor(pt3000_sheet$Treatment)
+design <- model.matrix(~1 + tx, data = pt3000_sheet)
+colnames(design) <- levels(tx)
+design
+```
+
+```{r}
+fit.reduced <- lmFit(Mval, design)
+# Contrast matrix
+colnames(design) <- make.names(colnames(design))
+contrast <- makeContrasts(TGFb-TC, levels = design)
+contrast
+fit <- contrasts.fit(fit.reduced, contrast)
+fit <- eBayes(fit)
+```
+
+```{r}
+summary(decideTests(fit))
+top <-topTable(fit,coef=1)
+top
+```
+
+look at analysing, for each phase, are the types of methylated cpg sites different from types of methylated cpg sites? does regression modeling already accomplish this, or does it accomplish this, but with noise?
+
+make list of m values \>0 + SE\*crit.val(0.99)
