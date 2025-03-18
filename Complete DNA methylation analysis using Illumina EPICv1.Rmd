@@ -1,0 +1,245 @@
+---
+title: "Complete DNA methylation analysis using Illumina EPICv1 microarray data"
+author: "Kennedy Zinn"
+date: "2025-03-18"
+output: html_document
+---
+
+```{r, echo = FALSE}
+suppressPackageStartupMessages(library(minfi))
+suppressPackageStartupMessages(library(limma))
+suppressPackageStartupMessages(library(DMRcate))
+suppressPackageStartupMessages(library(maxprobes))
+suppressPackageStartupMessages(library(readxl))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(missMethyl))
+suppressPackageStartupMessages(library(MethylToSNP))
+```
+
+# Smooth Muscle Cell (SMC) Comparisons
+
+## Load Data
+
+```{r, echo = FALSE}
+rgSet <- read.metharray.exp("/path/to/idat/folder", force = T)
+```
+
+load sample sheet
+
+```{r, echo = FALSE}
+sample_sheet <- read_excel("/path/to/excel/sample/sheet")
+```
+
+## Quality check
+
+```{r, echo = FALSE}
+suppressMessages(qcReport(rgSet, pdf = "/path/to/new/qcReport.pdf", sampNames = sample_sheet$`Sample Name`, sampGroups = sample_sheet$Status))
+```
+
+## Pre-Process
+```{r}
+source("process_methyl_microarray.R")
+gmSet <- process_methyl_microarray(rgSet)
+```
+
+Beta values, which range between [0,1], represent the proportion of methylated DNA copies at a specific CpG site compared to all of the DNA copies at that site.  Beta values for the ith CpG site are mathematically defined as,
+
+Beta(i) = max(yi(methyl),0) / [max(yi(unmethyl), 0) + max(yi(methyl), 0) + alpha],
+
+where yi methyl and unmethyl are the intensities measured by the ith methylated and unmethylated probes, respectively. 0 ensures that negative signals that take place after background adjustment are not considered. Alpha, a constant (usually 100), serves as an offset to regularize beta when both methylated and unmethylated instensities are low. Beta values are intuitive, and hence useful for visual presentations of the reads. (Du et al., 2010)
+
+```{r, echo = FALSE}
+# Compute beta values
+beta_values <- getBeta(gmSet)
+colnames(beta_values) <- sample_sheet$`Sample Name`
+```
+
+M values are log transformed beta values. Negative M values indicate higher levels of unmethylated DNA copies than methylated DNA copies. Postive M values indicate higher levels of methylated DNA copies than unmethylated. M values close to zero indicate similar intensities between methylated and unmethylated probes. M values are mathematically expressed as, 
+
+M(i) = log2([max(yi(methyl))+alpha]/[max(yi(unmethyl))+alpha])
+
+where alpha is a constant to offset dramatic changes resulting from small estimation errors. M values can be expressed in terms of beta values,
+
+M(i) = log2(Beta(i)/[1 - Beta(i)])
+
+and therefore, beta values can be expressed in terms of M values,
+
+Beta(i) = 2^M(i) / [2^M(i) + 1]
+
+M values are more statistically sound than beta values.
+
+```{r, echo = FALSE}
+Mval <- getM(gmSet)
+dim(Mval)
+```
+
+Use the PCA plot to identify possible sources of variation other than the factor of interest. In my case, samples clustered by Sentrix ID, suggesting a batch effect. Identifying such sources of variation can be included in the model during differential analysis.
+```{r, echo = FALSE}
+# PCA plot of M values
+par(mfrow=c(1,1))
+plotMDS(Mval, labels=sample_sheet$`Sample Name`, col=as.integer(factor(sample_sheet$Status)))
+legend("top",legend=c("Control","Patient"),pch=16,cex=.5,col=1:2)
+```
+
+## Differential Methylation Analysis
+
+Design matrix
+
+```{r, echo = FALSE}
+batch <- factor(ifelse(sample_sheet$`Sentrix ID` == 20408156, "batch.effect", "no.batch"))
+disease <- factor(sample_sheet$Status)
+design <- model.matrix(~1 + disease + batch, data = sample_sheet)
+colnames(design) <- c(levels(disease),levels(batch)[-1])
+design
+```
+
+Fit model using M values as M values are more statistically valid, beta is more intuitive (Du et al., 2010)
+```{r}
+fit.reduced <- lmFit(Mval, design)
+# Contrast matrix
+colnames(design) <- make.names(colnames(design))
+# contrast matrix specifies the factor of interest, in this case 'Status', a binary variable of 0 = control, 1 = patient
+contrast <- makeContrasts(control - patient, levels = design)
+contrast
+fit <- contrasts.fit(fit.reduced, contrast)
+fit <- eBayes(fit)
+```
+Model Results
+```{r, echo = FALSE}
+summary(decideTests(fit))
+top<-topTable(fit,coef=1, number = Inf)
+head(top)
+```
+
+Visualize results using beta values
+
+```{r, echo = FALSE}
+cpgs <- rownames(top)
+par(mfrow = c(2,2), cex = 0.5)
+for(i in 1:4){
+stripchart(beta_values[rownames(beta_values) %in% cpgs[i],]~design[,2],method="jitter",
+group.names=c("Control","Patient"), pch = 16,cex=1.5,col=c(4,2), ylab="Beta values",
+vertical=TRUE,cex.axis=1.5,cex.lab=1.5)
+title(cpgs[i],cex.main=1.5)
+}
+```
+
+## Differential Variability Analysis
+
+fit model testing variances between controls and patients
+
+```{r, echo = FALSE}
+fitvar <- varFit(Mval, design = design, coef = 1:3)
+summary(decideTests(fitvar))
+topVar <- topVar(fitvar, coef=3)
+topVar
+```
+
+Visualize top 4 most differentially variable CpGs
+
+```{r, echo = FALSE}
+cpgsDV <- rownames(topVar)
+par(mfrow=c(2,2), cex = 0.5)
+for(i in 1:4){
+stripchart(beta_values[rownames(beta_values)==cpgsDV[i],]~design[,2], method="jitter",
+group.names=c("Control","Patient"),pch=16,cex=1.5,col=c(4,2),ylab="Beta values",
+vertical=TRUE,cex.axis=1.5,cex.lab=1.5)
+title(cpgsDV[i],cex.main=1.5)
+}
+```
+
+Identify the most variable patient sample
+
+```{r, echo = FALSE}
+par(mfrow=c(2,2), cex = 0.5)
+for(i in 1:4){
+stripchart(beta_values[rownames(beta_values)==cpgsDV[i],]~colnames(beta_values), method="jitter",pch=16,cex=1.5,ylab="Beta values",
+vertical=TRUE,cex.axis=1.5,cex.lab=1.5)
+title(cpgsDV[i],cex.main=1.5)
+}
+```
+
+## Gene Ontology Analysis
+
+### CpG Analysis
+
+```{r, echo = F}
+# Observe differentially methylated CpGs using 1% FDR cut-off
+table(top$adj.P.Val < 0.01)
+```
+
+505k significant cpg sites is too much to yield biologically relevant results. We can trim the data by introducing a cutoff of the change in beta values.
+```{r}
+# make sure that order of beta values matches order after analysis
+beta <- getBeta(gmSet)
+beta <- beta[match(rownames(top),rownames(beta)),]
+beta_ctrl <- rowMeans(beta[,disease=="control"])
+beta_pt <- rowMeans(beta[,disease=="patient"])
+Delta_beta <- beta_ctrl - beta_pt
+sigDM <- top$adj.P.Val < 0.01 & abs(Delta_beta) > 0.25
+table(sigDM)
+```
+
+
+```{r}
+topCpGs <- beta[sigDM == TRUE,]
+sigCpGs <- rownames(topCpGs)
+check <- getMappedEntrezIDs(sig.cpg = sigCpGs, array.type = "EPIC")
+```
+
+```{r}
+# Check number of genes to which CpGs are annotated
+length(check$sig.eg)
+```
+
+```{r}
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+gst <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(top), collection="GO", array.type = "EPIC",
+              plot.bias=TRUE) # Include "all.cpg" option if filtering CpGs prior to testing
+```
+
+```{r}
+topGSA(gst)
+```
+
+We can also test according to a specified gene set using "gsameth"
+
+### Region level analysis
+
+```{r}
+source("/Users/kennedyzinn/Desktop/OneDrive - UTHealth Houston/GRA/dna methyl/region_analysis.R")
+region_analysis("control - patient", "GO", NULL, "0.01")
+```
+
+We can also test according to a specified gene set using "gsaregion"
+
+## KEGG Analysis
+
+### CpG Analysis
+
+```{r}
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+gst <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(top), collection="KEGG", array.type = "EPIC",
+              plot.bias=TRUE) # Include "all.cpg" option if filtering CpGs prior to testing
+```
+
+```{r}
+topGSA(gst)
+# We can also test according to a specified gene set using "gsameth"
+```
+
+
+### Region level analysis
+
+```{r}
+region_analysis("control - patient", "KEGG", NULL, "0.01")
+```
+
+```{r}
+# plot DMRs
+cols <- c(1,2)[disease]
+names(cols) <-disease
+par(mfrow=c(1,1))
+DMR.plot(ranges=results.ranges, dmr=2, CpGs=beta_values, phen.col=cols, 
+           what="Beta", arraytype="EPICv1", genome="hg19")
+```
