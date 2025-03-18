@@ -20,16 +20,14 @@ suppressPackageStartupMessages(library(MethylToSNP))
 
 ## Load Data
 
-load the idat files: For SMC comparisons, samples 2 APCK, 4 APCK, 6 APCK, 8 APCK, 10 APCK, 12 APCK and 14 APCK are from SMC phase (rest are from neural crest phase). Of those, 2, 6, 10 and 14 are the controls.
-
 ```{r, echo = FALSE}
-rgSet <- read.metharray.exp("/Users/kennedyzinn/Desktop/OneDrive - UTHealth Houston/GRA/dna methyl/SMC", force = T)
+rgSet <- read.metharray.exp("/path/to/idat/folder", force = T)
 ```
 
 load sample sheet
 
 ```{r, echo = FALSE}
-sample_sheet <- read_excel("/Users/kennedyzinn/Desktop/OneDrive - UTHealth Houston/GRA/dna methyl/SMC/SampleSheet_SMC.xlsx")
+sample_sheet <- read_excel("/path/to/excel/sample/sheet")
 ```
 
 ## Quality check
@@ -40,7 +38,7 @@ suppressMessages(qcReport(rgSet, pdf = "/Users/kennedyzinn/Downloads/qcReport.pd
 
 ## Pre-Process
 ```{r}
-source("/Users/kennedyzinn/Desktop/OneDrive - UTHealth Houston/GRA/dna methyl/process_methyl_microarray.R")
+source("process_methyl_microarray.R")
 gmSet <- process_methyl_microarray(rgSet)
 ```
 
@@ -75,7 +73,7 @@ Mval <- getM(gmSet)
 dim(Mval)
 ```
 
-It appears that the group with Sentrix ID 204081560070 clusters, suggesting a batch effect?
+Use the PCA plot to identify possible sources of variation other than the factor of interest. In my case, samples clustered by Sentrix ID, suggesting a batch effect. Identifying such sources of variation can be included in the model during differential analysis.
 ```{r, echo = FALSE}
 # PCA plot of M values
 par(mfrow=c(1,1))
@@ -88,7 +86,7 @@ legend("top",legend=c("Control","Patient"),pch=16,cex=.5,col=1:2)
 Design matrix
 
 ```{r, echo = FALSE}
-batch <- factor(ifelse(sample_sheet$`Sentrix ID` == 204081560070, "batch.effect", "no.batch"))
+batch <- factor(ifelse(sample_sheet$`Sentrix ID` == 20408156, "batch.effect", "no.batch"))
 disease <- factor(sample_sheet$Status)
 design <- model.matrix(~1 + disease + batch, data = sample_sheet)
 colnames(design) <- c(levels(disease),levels(batch)[-1])
@@ -100,6 +98,7 @@ Fit model using M values as M values are more statistically valid, beta is more 
 fit.reduced <- lmFit(Mval, design)
 # Contrast matrix
 colnames(design) <- make.names(colnames(design))
+# contrast matrix specifies the factor of interest, in this case 'Status', a binary variable of 0 = control, 1 = patient
 contrast <- makeContrasts(control - patient, levels = design)
 contrast
 fit <- contrasts.fit(fit.reduced, contrast)
