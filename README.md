@@ -5,6 +5,7 @@ The two R files (process_microarry and region_analysis) are user defined functio
 Current state of the files are messy in explanation and execution. This is my first time analyzing DNA methylation data, so this is a work in progress. Updates and improvements will be made regularly.
 
 The following sources have been essential in allowing me to complete these projects;
+
 For cleaning and processing the raw data:
 https://github.com/raulsanzr/DNA-Methylation/blob/main/R/human_epic_analysis.R
 
