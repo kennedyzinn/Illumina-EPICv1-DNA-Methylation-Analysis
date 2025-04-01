@@ -93,21 +93,38 @@ colnames(design) <- c(levels(disease),levels(batch)[-1])
 design
 ```
 
+## Removing Unwanted Variation with SVA package
+
 Fit model using M values as M values are more statistically valid, beta is more intuitive (Du et al., 2010)
+
 ```{r}
-fit.reduced <- lmFit(Mval, design)
-# Contrast matrix
-colnames(design) <- make.names(colnames(design))
-# contrast matrix specifies the factor of interest, in this case 'Status', a binary variable of 0 = control, 1 = patient
-contrast <- makeContrasts(control - patient, levels = design)
-contrast
-fit <- contrasts.fit(fit.reduced, contrast)
-fit <- eBayes(fit)
-```
-Model Results
-```{r, echo = FALSE}
-summary(decideTests(fit))
-top<-topTable(fit,coef=1, number = Inf)
+# create full and null model
+full <- design
+null <- model.matrix(~1 + batch, data = sample_sheet)
+
+# applying sva function
+library(sva)
+n.sv <- num.sv(Mval,full,method = "leek") # estimate number of latent factors
+n.sv
+# estimate the surrogate variables (variables which are intended to represent the unknown variation)
+svobj <- sva(Mval, full, null, n.sv = n.sv)
+
+# adjust surrogate variable using f-test p values of each cpg site
+f_p_val <- f.pvalue(Mval,full,null)
+q_val <- p.adjust(f_p_val, method = "BH")
+
+fullSv <- cbind(full, svobj$sv)
+nullSv <- cbind(null, svobj$sv)
+p_val_sv <- f.pvalue(Mval, fullSv, nullSv)
+q_val_sv <- p.adjust(p_val_sv, method = "BH")
+
+# run model while adjusting for surrogate variables
+fit <- lmFit(Mval, fullSv)
+colnames(fullSv) <- make.names(colnames(fullSv))
+contrast <- makeContrasts(control - patient, levels = fullSv)
+fitContrast <- contrasts.fit(fit, contrast)
+fit <- eBayes(fitContrast)
+top <- topTable(fit, adjust = "BH", number = "Inf")
 head(top)
 ```
 
