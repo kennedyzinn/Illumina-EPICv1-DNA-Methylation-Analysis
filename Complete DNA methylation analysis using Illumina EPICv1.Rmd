@@ -185,7 +185,8 @@ title(cpgsDV[i],cex.main=1.5)
 table(top$adj.P.Val < 0.01)
 ```
 
-505k significant cpg sites is too much to yield biologically relevant results. We can trim the data by introducing a cutoff of the change in beta values.
+More than 10k significant cpg sites is too much to yield biologically relevant results. We can trim the data by introducing a cutoff of the change in beta values.
+
 ```{r}
 # make sure that order of beta values matches order after analysis
 beta <- getBeta(gmSet)
@@ -193,15 +194,17 @@ beta <- beta[match(rownames(top),rownames(beta)),]
 beta_ctrl <- rowMeans(beta[,disease=="control"])
 beta_pt <- rowMeans(beta[,disease=="patient"])
 Delta_beta <- beta_ctrl - beta_pt
-sigDM <- top$adj.P.Val < 0.01 & abs(Delta_beta) > 0.25
+sigDM <- top$adj.P.Val < 0.01 & abs(Delta_beta)>0.25
 table(sigDM)
 ```
-
 
 ```{r}
 topCpGs <- beta[sigDM == TRUE,]
 sigCpGs <- rownames(topCpGs)
-check <- getMappedEntrezIDs(sig.cpg = sigCpGs, array.type = "EPIC")
+library(IlluminaHumanMethylationEPICanno.ilm10b5.hg38)
+data(IlluminaHumanMethylationEPICanno.ilm10b5.hg38)
+anno <- getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b5.hg38)
+check <- getMappedEntrezIDs(sig.cpg = sigCpGs, array.type = "EPIC", anno = anno)
 ```
 
 ```{r}
@@ -210,13 +213,12 @@ length(check$sig.eg)
 ```
 
 ```{r}
-library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
-gst <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(top), collection="GO", array.type = "EPIC",
-              plot.bias=TRUE) # Include "all.cpg" option if filtering CpGs prior to testing
+gst.go <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(top), collection="GO", array.type = "EPIC",
+              plot.bias=TRUE, anno = anno, sig.genes = T) # Include "all.cpg" option if filtering CpGs prior to testing
 ```
 
 ```{r}
-topGSA(gst)
+topGSA(gst.go[, -ncol(gst.go)])
 ```
 
 We can also test according to a specified gene set using "gsameth"
@@ -225,7 +227,13 @@ We can also test according to a specified gene set using "gsameth"
 
 ```{r}
 source("/Users/kennedyzinn/Desktop/OneDrive - UTHealth Houston/GRA/dna methyl/region_analysis.R")
-region_analysis("control - patient", "GO", NULL, "0.01")
+results.ranges <- region_analysis("control - patient", "0.25", "0.01")
+```
+
+```{r}
+gst.region.go <- goregion(results.ranges, all.cpg=rownames(top), 
+                       collection= "GO", array.type="EPIC", plot.bias = T, anno = anno, sig.genes = T)
+topGSA(gst.region.go[, -ncol(gst.region.go)])
 ```
 
 We can also test according to a specified gene set using "gsaregion"
@@ -235,28 +243,75 @@ We can also test according to a specified gene set using "gsaregion"
 ### CpG Analysis
 
 ```{r}
-library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
-gst <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(top), collection="KEGG", array.type = "EPIC",
-              plot.bias=TRUE) # Include "all.cpg" option if filtering CpGs prior to testing
+gst.kegg <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(top), collection="KEGG", array.type = "EPIC", anno = anno, plot.bias=TRUE, sig.genes = T) # Include "all.cpg" option if filtering CpGs prior to testing
 ```
 
 ```{r}
-topGSA(gst)
+topGSA(gst.kegg[, -ncol(gst.kegg)])
 # We can also test according to a specified gene set using "gsameth"
 ```
-
 
 ### Region level analysis
 
 ```{r}
-region_analysis("control - patient", "KEGG", NULL, "0.01")
+gst.region.kegg <- goregion(results.ranges, all.cpg=rownames(top), 
+                       collection= "KEGG", array.type="EPIC", plot.bias = T, anno = anno, sig.genes = T)
+topGSA(gst.region.kegg[, -ncol(gst.region.kegg)]) 
+```
+
+# Identify the direction of methylation in significant gene sets
+```{r}
+sig.GeneSets <- unique(c(gst.go$SigGenesInSet[gst.go$FDR < 0.05], 
+                         gst.region.go$SigGenesInSet[gst.region.go$FDR < 0.05], 
+                         gst.kegg$SigGenesInSet[gst.kegg$FDR <0.05,], 
+                         gst.region.kegg$SigGenesInSet[gst.region.kegg$FDR < 0.05]))
+# Split the gene sets into individual genes
+split_genes <- function(gene_set) {
+ unlist(strsplit(gene_set, split = "[,]"))
+}
+
+# Apply the splitting function to all significant gene sets
+all_genes <- unique(unlist(lapply(sig.GeneSets, split_genes)))
 ```
 
 ```{r}
-# plot DMRs
-cols <- c(1,2)[disease]
-names(cols) <-disease
-par(mfrow=c(1,1))
-DMR.plot(ranges=results.ranges, dmr=2, CpGs=beta_values, phen.col=cols, 
-           what="Beta", arraytype="EPICv1", genome="hg19")
+
+# Annotate probes
+library(tibble)
+top <- rownames_to_column(top, var = "ID")
+anno <- as.data.frame(anno)
+anno <- rownames_to_column(anno, var = "ID")
+top <- merge(top, anno, by = "ID")
+```
+
+```{r}
+# Split UCSC_RefGene_Name into individual genes
+library(tidyr)
+top <- top %>%
+  mutate(UCSC_RefGene_Name = strsplit(as.character(UCSC_RefGene_Name), split = "[,;]")) %>%
+  unnest(UCSC_RefGene_Name)
+
+# Filter for significant gene sets
+filteredResults <- top[top$UCSC_RefGene_Name %in% all_genes, ]
+
+```
+
+```{r}
+
+# Summarize methylation status for each significant gene set
+methylationSummary <- sapply(all_genes, function(gene) {
+ probes <- filteredResults[filteredResults$UCSC_RefGene_Name == gene, ]
+ avgLogFC <- mean(probes$logFC)
+ return(avgLogFC)
+})
+```
+
+```{r}
+# Determine methylation status
+methylationStatus <- ifelse(methylationSummary > 0, "Hypermethylated", "Hypomethylated")
+
+# Combine results into a data frame
+results <- data.frame(GeneSet = all_genes, MethylationStatus = methylationStatus)
+
+print(results)
 ```
